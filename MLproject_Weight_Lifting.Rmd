@@ -1,0 +1,404 @@
+---
+title: 'Machine Learning project: Developing a Prediction Model'
+author: "Peter Toyinbo"
+date: "February 11, 2018"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(caret)
+library(randomForest)
+library(gbm)
+library(ggplot2) 
+library(gridExtra)
+
+```
+
+
+## Executive Summary
+
+
+The purpose of this project was to predict how well a weight lifting exercise is performed using secondary data from accelerometers.
+
+
+Two classifiers were considered: Random Forest and Generalized Boosted Regression Modeling. Both models showed very high prediction accuracy on a test sample. The final choice, Random Forest, performed better with a higher 99% accuracy and lower expected out-of-sample error.
+
+
+## Background
+
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. 
+
+
+In this project, the goal is to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+
+## General Approach
+
+1. Prepare the labeled data (includes target variable)
+
+2. Split the labeled data  into Training and Testing
+
+3. Use the training set for feature selection via cross-validation after pre-processing
+
+4. Apply prediction model to testing set once and obtain its out-of-sample error rate
+
+5. Apply prediction model to the unlabeled data (with no target variable) to classify 20 different test cases 
+
+
+
+## Data Preparation
+
+
+### Data description
+
+
+Six young health male participants aged between 20-28 years, with little weight lifting experience, were asked to perform one set of 10 repetitions of a weight lifting excercise under the supervision of an experienced weight lifter.
+
+
+The exercice, the Unilateral Dumbbell Biceps Curl, was performed repeatedly in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E).
+
+
+Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes. 
+
+
+Source: http://groupware.les.inf.puc-rio.br/har#weight_lifting_exercises#ixzz56AlaSYsJ
+
+
+### File retrieval and reading into R:
+
+
+Set up the urls from where to download the two files
+
+
+```{r step1, echo=TRUE, tidy=TRUE}
+
+urlTrain <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+urlTest <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+```
+
+
+Download the files *pml-training.csv* and *pml-testing.csv* and read them into R as *PMLtrain* and *PMLtest* respectively.
+
+
+```{r step2, echo=TRUE, tidy=TRUE, results='hide', message=FALSE, warning=FALSE}
+
+pml_training <-  "pml-training.csv"
+
+if (file.exists(pml_training)) {
+        PMLtrain <- read_csv(pml_training)
+} else { 
+        download.file(urlTrain, pml_training)
+        PMLtrain <- read_csv(pml_training)
+}                           
+
+
+pml_testing <-  "pml-testing.csv"
+
+if (file.exists(pml_testing)) {
+        PMLtest <- read_csv(pml_testing)
+} else { 
+        download.file(urlTest, pml_testing)
+        PMLtest <- read_csv(pml_testing)
+}   
+
+```
+
+
+Missing name for column 1 was automatically filled in as X1.
+
+ 
+Review the datasets starting with the *PMLtest*.
+
+
+```{r step3a, echo=TRUE, tidy=TRUE}
+
+#str(PMLtest)     # Not run due to space consideration
+dim(PMLtest)
+
+```
+
+
+The 20 x 160 *PMLtest* dataset contains 20 test cases for which the classification status (how well a weight lifting exercise is performed) is not available. There are 159 feature variables ("problem_id" in column 160 is row index). This dataset will be put aside untill the very end when the final developed model will be applied on it. 
+
+
+Next, review the *PMLtrain* dataset
+
+
+
+```{r step3b, echo=TRUE, tidy=TRUE}
+
+#str(PMLtrain)      # Not run due to space consideration
+
+dim(PMLtrain)
+names(PMLtrain)
+
+```
+
+
+The *PMLtrain* dataset consists of 19622 observations of the same 159 independent variables (features) plus the target variable *classe* with 5-category levels. This dataset will be used to develop the predictive model.
+
+
+The first seven columns are not directly relevant to our prediction in the current study and are dropped. One of these, "X1", is the row index but the column name is missing from the raw data. 
+
+
+```{r step5, echo=TRUE, tidy=TRUE}
+
+PMLtrain  <- PMLtrain[,-c(1:7)]
+
+```
+
+
+
+### Missing data
+
+
+Dataset was checked for missing data.
+
+
+```{r step6, echo=TRUE, tidy=TRUE}
+
+mean(is.na(PMLtrain)) 
+
+```
+
+
+There was 64% missing overall in the data. Next the missing pattern was explored using a histogram.
+
+
+
+```{r step7, echo=TRUE, tidy=TRUE}
+
+propNA <- colSums(is.na(PMLtrain))/nrow(PMLtrain)
+hist(propNA, nclass = 100, main = "Proportion missing across features", xlab = "Proportion of missing data")  
+
+```
+
+
+The features reveal two patterns: either have close to zero missing or in the upper 90% missing. 
+
+
+Exclude the variables with missing values  from the analysis.
+
+
+```{r step8, echo=TRUE, tidy=TRUE}
+
+hiNAvar <- which(propNA > 0)  
+
+PMLtrain <- PMLtrain[,-hiNAvar]
+
+str(PMLtrain)
+
+```
+
+ 
+The final number of the variables to be used in analysis has reduced to 50 where the 50th column is the target variable. 
+
+
+
+## Model building
+
+
+The cleaned *PMLtrain* dataset is now ready to be used for building the predition model.
+
+Split into *training* (to train/develop the model) and *testing* (to test the model and compute out-of-sample error). Use split ratio 60:40.
+
+
+```{r step9, echo=TRUE, tidy=TRUE}
+
+inTrain <- createDataPartition(PMLtrain$classe, p = 0.60, list = FALSE)
+training <- PMLtrain[inTrain,]
+testing <- PMLtrain[-inTrain,]
+
+dim(training)
+dim(testing)
+
+
+```
+
+
+Check to ensure comparable distributions of the target variable *classe* between both training and testing samples. 
+
+
+
+```{r step10, echo=TRUE, tidy=TRUE}
+
+g1 <- ggplot(training, aes(x=classe, fill=classe)) + geom_bar() +
+        labs( title = "Train data")
+
+g2 <- ggplot(testing, aes(x=classe, fill=classe)) + geom_bar() +
+        labs( title = "Test data")
+        
+grid.arrange(g1, g2, ncol=2)
+
+```
+
+
+The variable *classe* shows very similar distribution between both training and testing sets after split. 
+
+
+Next, the specification of the candidate models will include pre-processing and cross-validation parameters as follows.
+
+
+### Data pre-processing
+
+
+To enhance numerical stability of the models the *train* set will be pre-processed by performing centering and scaling of the predictor variables. Also the "nzv" filter will be applied to exclude zero- or near zero-variance predictors. 
+
+Later, when the trained model is applied to *test* data to predict a new sample, the *train* set pre-process information will be used. That is, both training and testing data will be pre-processed the same way.
+
+
+
+### Cross-validation
+
+
+To minimize overfitting and subsequently minize out of sample errors, the tuning parameters for the modeling procedure were set to perform a 5-fold cross-validation.
+
+
+Specify the model parameters for cross-validation.
+
+
+```{r step11, echo=TRUE, tidy=TRUE}
+
+ctrl <- trainControl(classProbs=TRUE,
+                     savePredictions=TRUE,
+                     method = "cv",
+                     number = 5)
+
+```
+
+
+### Candidate models
+
+
+Two of the commonly used predictive modelling and machine learning technique for multi-classification problems are Random Forest (RF), and Generalized Boosted Regression Modeling (GBM) with a multinomial method.
+
+
+Train the RF on the *train* data and display model fit results
+
+
+```{r step12, echo=TRUE, tidy=TRUE}
+
+# RF
+
+set.seed(5555)
+trainMod.rf <- train(classe ~ ., data=training, method="rf",  
+        trControl = ctrl, 
+        preProcess = c("center", "scale", "nzv"))
+
+print(trainMod.rf)
+
+```
+
+
+Train the GBM on the *train* data and display model fit results.
+
+
+```{r step13, echo=TRUE, tidy=TRUE}
+
+# GBM
+
+set.seed(5555)
+trainMod.gbm <- train(classe ~ ., data=training, method="gbm", 
+        trControl = ctrl, verbose = FALSE,
+        preProcess = c("center", "scale", "nzv"))
+
+print(trainMod.gbm)
+
+```
+
+
+Apply the two trained models separately on the *test* data to test their prediction. 
+
+
+```{r step14, echo=TRUE, tidy=TRUE}
+
+set.seed(5555)
+pred.rf <- predict(trainMod.rf, testing, class = "class")
+
+set.seed(5555)
+pred.gbm <- predict(trainMod.gbm, testing, class = "class")
+
+```
+
+
+Next, compare their prediction performance. 
+
+
+Display the confusion matrix for RF
+
+
+```{r step15a, echo=TRUE, tidy=TRUE}
+
+cM.rf <- confusionMatrix(pred.rf, testing$classe)     
+cM.rf
+
+```
+
+
+Display the confusion matrix for GBM
+
+
+```{r step15b, echo=TRUE, tidy=TRUE}
+
+cM.gbm <- confusionMatrix(pred.gbm, testing$classe)
+cM.gbm
+
+```
+
+
+
+The overall prediction accuracy is greater for the RF model (99%) compared to GBM (95%). The balanced accuracy statistics across the predicted classes A to E are also better for RF model.
+
+
+## Out-of-sample error
+
+
+Compute the expected out-of-sample error rate for each model as: 1-Accuracy
+        
+
+```{r step15c, echo=TRUE, tidy=TRUE}
+
+
+DF <- data.frame(rbind(cM.rf$overall, cM.gbm$overall))
+DF$Error <- 1 - DF$Accuracy
+row.names(DF) <- c("RF", "GBM")
+DF[,c(1,2,8)]
+
+
+```
+
+
+The out-of-sample error rate of the Random Forest classifier is about five times smaller than GBM's.
+
+
+The Random Forest classifier is chosen as the final model.
+
+
+## Predicting new cases
+
+
+Use the final prediction model, Random Forest, to classfy each of 20 different test cases in the unlabled *PMLtest* data into one of A, B, C, D, and E activity classes.
+
+
+```{r step16, echo=TRUE, tidy=TRUE}
+
+ predict(trainMod.rf, PMLtest)
+
+```
+
+
+
+## Reference
+
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013. 
+
+Read more: 
+http://groupware.les.inf.puc-rio.br/har#weight_lifting_exercises#ixzz56AmUAJMg
+
